@@ -17,110 +17,132 @@
 # Created by: Yatsu :)
 # ==============================================
 
-
 def main [character_name: string] {
-  print "Sending request..."
-  mut c_name = $character_name
-  if ($character_name | str contains " ") {
-    $c_name = $c_name | split words | str join 
-  }
-  mut file_content = ""
-  try {
-    $file_content = http get $"https://www.onetricks.gg/fr/champions/ranking/($c_name)"
-  } catch {
-    return $"'($character_name)' is not a valid LoL Character"
-  }
-  
-  let body = parse_file $file_content "build"
-    
-  # Print starting items (nested lists)
-  print "--- Starting Items ---"
-  print ($body.start_items | take 2 | each {|i| $i | str join ' --> '})
-  
-  # Print boots
-  print "--- Boots ---"
-  print ($body.boots | take 3)
+  main build $character_name
+}
 
-  # Print popular items
-  print "--- Popular Items ---"
-  print ($body.popular_items | take 5)
-
-  print "--- Frequent Bans ---"
-  print ($body.bans | take 3)
-
-  print "Runes coming soon..."
-  print "Entire build coming soon..."
-}  
-
+# Entry point for build mode (standard)
 def "main build" [character_name: string] {
-  main $character_name
+  show_build $character_name "builds"
 }
 
+# Entry point for ARAM mode
 def "main aram" [character_name: string] {
-  print "Sending request..."
-  mut c_name = $character_name
-  if ($character_name | str contains " ") {
-    $c_name = $c_name | split words | str join 
-  }
-  mut file_content = ""
-  try {
-    $file_content = http get $"https://www.onetricks.gg/fr/champions/aram/($c_name)"
-  } catch {
-    return $"'($character_name)' is not a valid LoL Character"
-  }
-
-  let body = parse_file $file_content "aram"
-
-  # Print starting items (nested lists)
-  print "--- Starting Items ---"
-  print ($body.start_items | take 2 | each {|i| $i | str join ' --> '})
-  
-  # Print boots
-  print "--- Boots ---"
-  print ($body.boots | take 3)
-
-  # Print popular items
-  print "--- Popular Items ---"
-  print ($body.popular_items | take 5)
+  show_build $character_name "aram"
 }
 
+# Unified logic for both build and aram modes
+def show_build [character_name: string, mode: string] {
+  print "🔍 Sending request..."
+
+  let c_name = normalize_name $character_name
+  let url = $"https://www.onetricks.gg/fr/champions/($mode)/($c_name)"
+
+  let file_content = (
+    try {
+      http get $url
+    } catch {
+      return $"'($character_name)' is not a valid LoL Character"
+    }
+  )
+
+  let body = parse_file $file_content $mode
+
+  if $mode == "builds" {
+    print "\n🔒 Frequent Bans:"
+    print ($body.bans | take 3)
+  }
+
+  print "\n🛡️ Starting Items:"
+  $body.start_items | take 2 | each {|set|
+    print "  Set:"
+    print $set 
+  }
+
+  print "\n👢 Boots:"
+  $body.boots | take 3 | each {|b| print $"  - ($b)" }
+
+  print "Build Path"
+  $body.mains | each {|item| 
+    print "  Set:"
+    print $item
+  }
+
+  print "\n🧪 Popular Items:"
+  $body.popular_items | take 5 | each {|item| print $"  - ($item)" }
+
+  if $mode == "builds" {
+    print "\n🔮 Runes coming soon..."
+    print "📦 Entire build coming soon..."
+  }
+}
+
+# Cleans and formats a character name (e.g., "Lee Sin" → "LeeSin")
+def normalize_name [name: string] {
+  if ($name | str contains " ") {
+    return ($name | split words | str join)
+  } else {
+    return $name
+  }
+}
+
+# Parses the HTML and extracts the build data
 def parse_file [raw: string, mode: string] {
-  let start_sep =  '<script id="__NEXT_DATA__" type="application/json">'
+  let start_sep = '<script id="__NEXT_DATA__" type="application/json">'
   let end_sep = '</script>'
 
-  let json_str = $raw | split row $start_sep | get 1 | split row $end_sep | first 
-  let json = $json_str | from json
-  let page_props = $json | get props.pageProps
+  let json_str = (
+    $raw
+    | split row $start_sep
+    | get 1
+    | split row $end_sep
+    | first
+  )
 
-  let items = $page_props | get itemData  
+  let json = $json_str | from json
+  let props = $json | get props.pageProps
+  let items = $props | get itemData
 
   mut last_patch = "all"
-  try {
-    # for rift only
-    $last_patch =  $page_props | get patchList | last
+  if $mode == "builds" {
+    $last_patch = $props.patchList | last
   }
+
+  let build_stats = $props.buildStats | get $last_patch
+
   mut bans = []
-  try {
-    # for rift only
-    $bans = $page_props | get bans | each {|b| $b.banId}
+  if $mode == "builds" {
+    $bans = $props.bans | each {|b| $b.banId }
   }
-  let build_stats = $page_props | get buildStats | get ($last_patch)
 
-  let boots: list<string>  = $build_stats | get boots | each {|b| $items | get ($b | first) | get name}
-  let start_items: list<list<string>> = $build_stats |
-      get startingItems |
-      each {|i| $i | first | each {|id| $items | get $id | get name}}
-  let popular_items: list<string> = $build_stats | get popularItems | each {|i| $items | get ($i | first) | get name}
+  let boots = (
+    $build_stats.boots
+    | each {|b| $items | get ($b | first) | get name }
+  )
 
+  let start_items = (
+    $build_stats.startingItems
+    | each {|i|
+        $i | first
+        | each {|id| $items | get $id | get name }
+      }
+  )
+  let all_start_items = ($build_stats.boots ++ $build_stats.startingItems) | each {|i|$i|first} | flatten | flatten
+
+  let popular_items = (
+    $build_stats.popularItems
+    | each {|i| $items | get ($i | first) | get name }
+  )
+  
   mut mains_data = []
   if mode != "aram" {
     # for rift only
-    $mains_data = $page_props | get rankings | select not small_all_time |  get mainsData | each {|m| $m.path}
+    $mains_data = $props | get matchHistory | each {|m| $m.timeline.orderedItems | each {|i| $i | into string} | where $it not-in $all_start_items | take 3 | str join ","}
   } else {
     # for aram only
-    $mains_data =  $page_props | get mainsData | each {|m| $m.path}
+    $mains_data =  $props | get mainsData | each {|m| $m.path}
   }
- 
+
   let counter = $mains_data | reduce --fold {} {|match, acc|
       let s = $match
       try {
@@ -131,7 +153,12 @@ def parse_file [raw: string, mode: string] {
   } |
     transpose k v | sort-by v --reverse |
     take 3 | each {|e| $e.k | split row "," | each {|id| $items | get $id | get name}}
-  $counter | each {|c| print $c}    
-  return {boots: $boots, start_items: $start_items, popular_items: $popular_items, bans: $bans}
+  
+  return {
+    boots: $boots,
+    start_items: $start_items,
+    popular_items: $popular_items,
+    bans: $bans,
+    mains: $counter
+  }
 }
-
