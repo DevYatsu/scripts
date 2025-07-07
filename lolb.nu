@@ -1,155 +1,112 @@
 #!/usr/bin/env nu
 
-# ==============================================
-# - League of Legends Build Tracker -
+# ==================================================
+# 🧠 League of Legends Build Tracker - Nushell
 #
-# This script fetches item builds for LoL champions from onetricks.gg.
-# Supports both standard Summoner's Rift and ARAM modes.
+# Fetches item builds from https://www.onetricks.gg
 #
-#  Usage:
-#   > main build "Miss Fortune"
+# Usage:
+#   > main build "Miss Fortune" --lang fr
 #   > main aram "Lee Sin"
 #
-#  Features:
-#   - Fetches boots, starting items, popular items
-#   - Shows frequent bans (Summoner's Rift only)
-#   - Computes most frequent full build paths
+# Features:
+#   - Boots, starting items, popular items
+#   - Frequent bans (Rift only)
+#   - Frequent build paths
+#   - Runes (simplified)
 #
-# Created by: Yatsu :)
-# ==============================================
+# Author: Yatsu :)
+# ==================================================
 
-# Entry point
+# ---------- CLI Commands ----------
+
 def main [character_name: string, --lang (-l): string = "en"] {
   validate_locale $lang (metadata $lang).span
   main build -l $lang $character_name
 }
 
-# Build mode
 def "main build" [--lang (-l): string = "en", character_name: string] {
   validate_locale $lang (metadata $lang).span
-  show_build $character_name $lang "builds" 
+  fetch_and_show $character_name $lang "builds"
 }
 
-# ARAM mode
 def "main aram" [--lang (-l): string = "en", character_name: string] {
   validate_locale $lang (metadata $lang).span
-  show_build $character_name $lang "aram"
+  fetch_and_show $character_name $lang "aram"
 }
 
-# Shared logic for both modes
-def show_build [character_name: string, lang: string, mode: string] {
+# ---------- Core Logic ----------
+
+def fetch_and_show [character_name: string, lang: string, mode: string] {
   print "🔍 Sending request..."
 
-  let c_name = normalize_name $character_name
-  let url = $"https://www.onetricks.gg/($lang)/champions/($mode)/($c_name)"
- 
-  let file_content = (
-    try {
-      http get $url
-    } catch {
-      print "Is the character name valid ?"
-      return $"Failed to reach endpoint '($url)'"
-    }
-  )
+  let name = normalize_name $character_name
+  let url = $"https://www.onetricks.gg/($lang)/champions/($mode)/($name)"
 
-  let data = parse_file $file_content $mode
+  let raw = try {
+    http get $url
+  } catch {
+    print $"⚠️  Failed to reach: ($url)"
+    return
+  }
+
+  let data = parse_build $raw $mode
 
   if $mode == "builds" {
-    print "\n🔒 Frequent Bans:"
-    $data.bans | take 3 | each {|b| print $"  - ($b)" }
+    show_list "🔒 Frequent Bans" ($data.bans|take 3)
   }
 
-  print "\n Runes"
-  $data.runes | take 2 | each {|set|
-    print "  Set:"
-    $set | each {|item| print $"    - ($item)" }
-  }
-
-  print "\n🛡️ Starting Items:"
-  $data.start_items | take 2 | each {|set|
-    print "  Set:"
-    $set | each {|item| print $"    - ($item)" }
-  }
-
-  print "\n👢 Boots:"
-  $data.boots | take 3 | each {|b| print $"  - ($b)" }
-
-  print "\n🧱 Build Path:"
-  $data.mains | each {|set|
-    print "  Set:"
-    $set | each {|item| print $"    - ($item)" }
-  }
-
-  print "\n🧪 Popular Items:"
-  $data.popular_items | take 5 | each {|item| print $"  - ($item)" }
+  show_nested "Runes" $data.runes
+  show_nested "🛡️ Starting Items" $data.start_items
+  show_list "👢 Boots" ($data.boots|take 3)
+  show_nested "🧱 Build Path" $data.mains
+  show_list "🧪 Popular Items" ($data.popular_items|take 5)
+  return
 }
 
-# Converts "Lee Sin" → "LeeSin"
-def normalize_name [name: string] {
-   $name | split words | str join
-}
-
-# Parses the HTML and extracts build data
-def parse_file [raw: string, mode: string] {
-  let start_tag = '<script id="__NEXT_DATA__" type="application/json">'
-  let end_tag = '</script>'
-
-  let json_str = (
+def parse_build [raw: string, mode: string] {
+  let json = (
     $raw
-    | split row $start_tag
+    | split row '<script id="__NEXT_DATA__" type="application/json">'
     | get 1
-    | split row $end_tag
+    | split row '</script>'
     | first
+    | from json
   )
 
-  let json = $json_str | from json
-  let props = $json | get props.pageProps
+  let props = $json.props.pageProps
   let items = $props.itemData
-
-  let patch = (
-    if $mode == "builds" {
-      $props.patchList | last
-    } else {
-      "all"
-    }
-  )
-
+  let patch = if $mode == "builds" { $props.patchList | last } else { "all" }
   let stats = $props.buildStats | get $patch
 
-  let bans = (
-    if $mode == "builds" {
+  let bans = if $mode == "builds" {
       try { $props.bans | each {|b| $b.banId } } catch { [] }
-    } else {
-      []
-    }
-  )
+    } else { [] }
+  
 
-  let champs = $props.championKeys | transpose k v | each {|i| $i.v}
+  let all_start_ids = ($stats.boots ++ $stats.startingItems)
+    | each {|i| $i | first }
+    | flatten | flatten
+
   let boots = $stats.boots | each {|b| $items | get ($b | first) | get name }
-
   let start_items = $stats.startingItems | each {|i|
     $i | first | each {|id| $items | get $id | get name }
   }
 
-  let all_start = ($stats.boots ++ $stats.startingItems)
-    | each {|i| $i | first }
-    | flatten
-    | flatten
-
   let popular_items = $stats.popularItems | each {|i|
     $items | get ($i | first) | get name
   }
-
-  let skill_path = $stats.skillPaths | each {|i| $i | first}
-  let runes = $stats.popRunes | transpose k v | each {|r| $"($r.k),($r.v|first|last|first)"}
-  let best_runes = filter_most_frequent $runes
-  | each {|e|
+  
+  let raw_runes = $stats.popRunes
+      | transpose k v
+      | each {|r| $"($r.k),($r.v|first|last|first)"}
+  let runes = filter_most_frequent $raw_runes
+      | each {|e|
         $e.k
         | split row ","
         | each {|id| try {$props.runes|get keystone |get $id} catch {$props.runes|get subStyle |get $id}| get name}        
       }
-     
-  # Build Path (mains)
+       
   let mains_data = (
     if $mode == "aram" {
       $props.mainsData | each {|m| $m.path }
@@ -158,7 +115,7 @@ def parse_file [raw: string, mode: string] {
       | each {|m|
           $m.timeline.orderedItems
           | each {|i| $i | into string }
-          | where {|id| $id not-in $all_start }
+          | where {|id| $id not-in $all_start_ids }
           | take 3
           | str join ","
         }
@@ -178,10 +135,29 @@ def parse_file [raw: string, mode: string] {
     popular_items: $popular_items,
     bans: $bans,
     mains: $mains,
-    champs: $champs,
-    skills: $skill_path,
-    runes: $best_runes
+    runes: $runes
   }
+}
+
+# ---------- Display Helpers ----------
+
+def show_list [title: string, values: list] {
+  print $"($title)"
+  $values | each {|v| print $"  - ($v)" }
+}
+
+def show_nested [title: string, sets: list<list<string>>] {
+  print $"($title)"
+  $sets | each {|set|
+    print "  Set:"
+    $set | each {|item| print $"    - ($item)" }
+  }
+}
+
+# ---------- Utilities ----------
+
+def normalize_name [name: string] {
+  $name | split words | str join
 }
 
 def validate_locale [lang: string, span: any] {
@@ -190,47 +166,23 @@ def validate_locale [lang: string, span: any] {
     error make {
       msg: "Invalid locale"
       label: {
-        text: "Valid locales are: en, de, es, fr, ko, ja, pl, pt, zh, tr"
+        text: "Valid locales: en, de, es, fr, ko, ja, pl, pt, zh, tr"
         span: $span
       }
     }
   }
 }
 
-def filter_most_frequent [target: list] {
-  $target
+def filter_most_frequent [entries: list<string>] {
+  $entries
     | reduce --fold {} {|entry, acc|
-        let key = $entry
         try {
-          $acc | update $key (($acc | get $key) + 1)
+          $acc | update $entry (($acc | get $entry) + 1)
         } catch {
-          $acc | insert $key 1
+          $acc | insert $entry 1
         }
       }
     | transpose k v
     | sort-by v -r
     | take 3
 }
-
-# we would need to store names in each lang or user would be limited
-# to only one lang, otherwise we could allow anything the first time
-# and then store the characters but it requires more efforts 
-# 
-# def get_champs [] {
-#   open champs.json | get champions | transpose k v | each {|i| $i.v}
-# }
-
-# def get_last_update [] {
-#   try {
-#     open champs.json | get lastUpdated | into datetime 
-#   } catch {
-#     null
-#   }
-# }
-
-# def get_updated_champs [lang: string] {
-#   let content = http get $"http://onetricks.gg/($lang)/champions/builds/Shaco"
-#   let body = parse_file $content "aram"
-#   $body.champs
-# }
-
