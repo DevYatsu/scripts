@@ -19,32 +19,36 @@
 # ==============================================
 
 # Entry point
-def main [character_name: string] {
-  main build $character_name
+def main [character_name: string, --lang (-l): string = "en"] {
+  validate_locale $lang (metadata $lang).span
+  main build -l $lang $character_name
 }
 
 # Build mode
-def "main build" [character_name: string] {
-  show_build $character_name "builds"
+def "main build" [--lang (-l): string = "en", character_name: string] {
+  validate_locale $lang (metadata $lang).span
+  show_build $character_name $lang "builds" 
 }
 
 # ARAM mode
-def "main aram" [character_name: string] {
-  show_build $character_name "aram"
+def "main aram" [--lang (-l): string = "en", character_name: string] {
+  validate_locale $lang (metadata $lang).span
+  show_build $character_name $lang "aram"
 }
 
 # Shared logic for both modes
-def show_build [character_name: string, mode: string] {
+def show_build [character_name: string, lang: string, mode: string] {
   print "🔍 Sending request..."
 
   let c_name = normalize_name $character_name
-  let url = $"https://www.onetricks.gg/fr/champions/($mode)/($c_name)"
-
+  let url = $"https://www.onetricks.gg/($lang)/champions/($mode)/($c_name)"
+ 
   let file_content = (
     try {
       http get $url
     } catch {
-      return $"'($character_name)' is not a valid LoL Character"
+      print "Is the character name valid ?"
+      return $"Failed to reach endpoint '($url)'"
     }
   )
 
@@ -53,6 +57,12 @@ def show_build [character_name: string, mode: string] {
   if $mode == "builds" {
     print "\n🔒 Frequent Bans:"
     $data.bans | take 3 | each {|b| print $"  - ($b)" }
+  }
+
+  print "\n Runes"
+  $data.runes | take 2 | each {|set|
+    print "  Set:"
+    $set | each {|item| print $"    - ($item)" }
   }
 
   print "\n🛡️ Starting Items:"
@@ -72,19 +82,11 @@ def show_build [character_name: string, mode: string] {
 
   print "\n🧪 Popular Items:"
   $data.popular_items | take 5 | each {|item| print $"  - ($item)" }
-
-  if $mode == "builds" {
-    print "\n🔮 Runes coming soon..."
-  }
 }
 
 # Converts "Lee Sin" → "LeeSin"
 def normalize_name [name: string] {
-  if ($name | str contains " ") {
-    $name | split words | str join
-  } else {
-    $name
-  }
+   $name | split words | str join
 }
 
 # Parses the HTML and extracts build data
@@ -122,6 +124,7 @@ def parse_file [raw: string, mode: string] {
     }
   )
 
+  let champs = $props.championKeys | transpose k v | each {|i| $i.v}
   let boots = $stats.boots | each {|b| $items | get ($b | first) | get name }
 
   let start_items = $stats.startingItems | each {|i|
@@ -137,6 +140,15 @@ def parse_file [raw: string, mode: string] {
     $items | get ($i | first) | get name
   }
 
+  let skill_path = $stats.skillPaths | each {|i| $i | first}
+  let runes = $stats.popRunes | transpose k v | each {|r| $"($r.k),($r.v|first|last|first)"}
+  let best_runes = filter_most_frequent $runes
+  | each {|e|
+        $e.k
+        | split row ","
+        | each {|id| try {$props.runes|get keystone |get $id} catch {$props.runes|get subStyle |get $id}| get name}        
+      }
+     
   # Build Path (mains)
   let mains_data = (
     if $mode == "aram" {
@@ -153,18 +165,7 @@ def parse_file [raw: string, mode: string] {
     }
   )
 
-  let mains = $mains_data
-    | reduce --fold {} {|entry, acc|
-        let key = $entry
-        try {
-          $acc | update $key (($acc | get $key) + 1)
-        } catch {
-          $acc | insert $key 1
-        }
-      }
-    | transpose k v
-    | sort-by v -r
-    | take 3
+  let mains = filter_most_frequent $mains_data
     | each {|e|
         $e.k
         | split row ","
@@ -176,6 +177,60 @@ def parse_file [raw: string, mode: string] {
     start_items: $start_items,
     popular_items: $popular_items,
     bans: $bans,
-    mains: $mains
+    mains: $mains,
+    champs: $champs,
+    skills: $skill_path,
+    runes: $best_runes
   }
 }
+
+def validate_locale [lang: string, span: any] {
+  let locales = [en de es fr ko ja pl pt zh tr]
+  if not ($lang in $locales) {
+    error make {
+      msg: "Invalid locale"
+      label: {
+        text: "Valid locales are: en, de, es, fr, ko, ja, pl, pt, zh, tr"
+        span: $span
+      }
+    }
+  }
+}
+
+def filter_most_frequent [target: list] {
+  $target
+    | reduce --fold {} {|entry, acc|
+        let key = $entry
+        try {
+          $acc | update $key (($acc | get $key) + 1)
+        } catch {
+          $acc | insert $key 1
+        }
+      }
+    | transpose k v
+    | sort-by v -r
+    | take 3
+}
+
+# we would need to store names in each lang or user would be limited
+# to only one lang, otherwise we could allow anything the first time
+# and then store the characters but it requires more efforts 
+# 
+# def get_champs [] {
+#   open champs.json | get champions | transpose k v | each {|i| $i.v}
+# }
+
+# def get_last_update [] {
+#   try {
+#     open champs.json | get lastUpdated | into datetime 
+#   } catch {
+#     null
+#   }
+# }
+
+# def get_updated_champs [lang: string] {
+#   let content = http get $"http://onetricks.gg/($lang)/champions/builds/Shaco"
+#   let body = parse_file $content "aram"
+#   $body.champs
+# }
+
